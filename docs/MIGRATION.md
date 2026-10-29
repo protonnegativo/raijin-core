@@ -185,8 +185,14 @@ counts): the bytes are identical for every tool except scan, below. diff's `Resu
 | raijin-xss | drop | `Origin`; Finding/Group have no `MarshalJSON` | `Fingerprint`, `New` | |
 | raijin-cors | drop | `Policy` stays | `Fingerprint`, `New` | |
 | raijin-takeover | drop; uses `Covers` and `Targets` | `Answer` stays; `Claim` and a **serialized** `fingerprint` field stay in the tool. The state key is `StateKey`, not `Fingerprint` | key func returns `f.StateKey` | the only tool whose state key is not `Fingerprint` |
-| raijin-diff | none | Replace the whole package with the core: `Marshal`, `Parse`, `Run`, `Entry`, `Field`, `SortedKeys`, `Error`, `Budget`, ranks. `type Result = core.Result[core.Entry, core.Entry]` | none | `Origin` is the shared origin of both runs |
+| raijin-diff | none | Replace the whole package with the core: `Marshal`, `Parse`, `Run`, `Entry`, `Field`, `SortedKeys`, `Error`, `Budget`, ranks. `type Result = core.Result[core.Entry, core.Entry]`; `SortedKeys` is generic, so it cannot be a `var` alias: call `core.SortedKeys` or wrap it in a one-line function | none | `Origin` is the shared origin of both runs |
 | raijin-mcp | none | No import needed today: it only writes `{"tool": ..., "errors": [{"kind", "hint"}]}` (tools.go `fail`). It may use `schema.Error` there; do not use it in `update`, whose `Error` has an extra `target` field | none | |
+
+### Checked
+
+This migration was applied to scratch copies of raijin-cors, raijin-ports, raijin-takeover, raijin-scan and
+raijin-diff (the other tools follow the same shape) and each tool's own `go vet` and `go test ./...` passed,
+including raijin-ports' end-to-end scope-only run.
 
 ### JSON contract the core guarantees
 
