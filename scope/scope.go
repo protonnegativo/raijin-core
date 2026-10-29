@@ -22,7 +22,6 @@ package scope
 
 import (
 	"bufio"
-	"fmt"
 	"net"
 	"net/url"
 	"os"
@@ -60,58 +59,154 @@ func Load(path string) (*Scope, error) {
 	return Parse(lines)
 }
 
-// Parse builds a Scope from rule lines. It returns an error for a rule it cannot use and for a scope
-// with no include rule.
+// Parse builds a Scope from rule lines. An invalid scope is an error, never a warning: Parse checks every
+// line and returns a *ParseError that lists all the lines it cannot use, each with what to write
+// instead, so the whole file can be fixed in one attempt. A scope with no include rule is also an error.
 func Parse(lines []string) (*Scope, error) {
 	s := &Scope{}
+	var bad []*LineError
 	for i, raw := range lines {
 		line := strings.TrimSpace(raw)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		r := rule{}
-		if strings.HasPrefix(line, "!") {
-			r.exclude = true
-			line = strings.TrimSpace(line[1:])
-		}
-		line = strings.ToLower(line)
-		if line == "" {
-			return nil, fmt.Errorf("scope line %d: empty exclusion", i+1)
-		}
-		switch {
-		case strings.Contains(line, "/"):
-			ip, ipnet, err := net.ParseCIDR(line)
-			if err != nil {
-				return nil, fmt.Errorf("scope line %d: invalid CIDR %q", i+1, line)
-			}
-			if !ip.Equal(ipnet.IP) {
-				// 10.0.0.7/24 would silently become the whole /24.
-				return nil, fmt.Errorf("scope line %d: CIDR %q has host bits set; write %s", i+1, line, ipnet)
-			}
-			r.ipnet = ipnet
-		case net.ParseIP(line) != nil:
-			ip := net.ParseIP(line)
-			bits := 128
-			if ip.To4() != nil {
-				ip = ip.To4()
-				bits = 32
-			}
-			r.ipnet = &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}
-		case strings.HasPrefix(line, "*."):
-			r.wildcard = true
-			r.domain = strings.TrimSuffix(strings.TrimPrefix(line, "*."), ".")
-		default:
-			r.domain = strings.TrimSuffix(line, ".")
-		}
-		if r.ipnet == nil && !validDomain(r.domain) {
-			return nil, fmt.Errorf("scope line %d: invalid domain %q (use example.com or *.example.com, with no scheme, port or path)", i+1, line)
+		r, prob := parseRule(line)
+		if prob != nil {
+			bad = append(bad, &LineError{Line: i + 1, Rule: line, Reason: prob.reason, Hint: prob.hint})
+			continue
 		}
 		s.rules = append(s.rules, r)
 	}
-	if len(s.includes()) == 0 {
-		return nil, fmt.Errorf("scope has no include rules")
+	if len(bad) == 0 && len(s.includes()) == 0 {
+		bad = append(bad, &LineError{
+			Reason: "no include rules",
+			Hint:   "add at least one rule that is not an exclusion, such as 'example.com', '*.example.com' or '10.0.0.0/24'",
+		})
+	}
+	if len(bad) > 0 {
+		return nil, &ParseError{Lines: bad}
 	}
 	return s, nil
+}
+
+type problem struct{ reason, hint string }
+
+// parseRule parses one trimmed, non-comment line.
+func parseRule(line string) (rule, *problem) {
+	r := rule{}
+	body := line
+	bang := ""
+	if strings.HasPrefix(body, "!") {
+		r.exclude = true
+		bang = "!"
+		body = strings.TrimSpace(body[1:])
+	}
+	body = strings.ToLower(body)
+	if body == "" {
+		return r, &problem{"empty exclusion", "write the host after '!', such as '!admin.example.com', or delete the line"}
+	}
+	switch {
+	case strings.Contains(body, "/"):
+		if strings.Contains(body, "://") {
+			return r, &problem{"URL in rule", "use the host only: " + suggest(bang, body)}
+		}
+		ip, ipnet, err := net.ParseCIDR(body)
+		if err != nil {
+			if net.ParseIP(body[:strings.Index(body, "/")]) == nil {
+				return r, &problem{"path in rule", "use the host only: " + suggest(bang, body)}
+			}
+			return r, &problem{"invalid CIDR", "write a network with a prefix length of 0-32 (IPv4) or 0-128 (IPv6), such as '" + bang + "10.0.0.0/24'"}
+		}
+		if !ip.Equal(ipnet.IP) {
+			// 10.0.0.7/24 would silently become the whole /24.
+			return r, &problem{"CIDR has host bits set", "write '" + bang + ipnet.String() + "' for the whole network, or '" + bang + ip.String() + "' for the single address"}
+		}
+		r.ipnet = ipnet
+		return r, nil
+	case net.ParseIP(body) != nil:
+		ip := net.ParseIP(body)
+		bits := 128
+		if ip.To4() != nil {
+			ip = ip.To4()
+			bits = 32
+		}
+		r.ipnet = &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}
+		return r, nil
+	case strings.HasPrefix(body, "*."):
+		r.wildcard = true
+		r.domain = strings.TrimSuffix(strings.TrimPrefix(body, "*."), ".")
+	default:
+		r.domain = strings.TrimSuffix(body, ".")
+	}
+	if prob := checkDomain(r.domain, r.wildcard, bang, body); prob != nil {
+		return r, prob
+	}
+	return r, nil
+}
+
+// checkDomain explains why a domain rule can never match, or returns nil.
+func checkDomain(d string, wildcard bool, bang, body string) *problem {
+	switch {
+	case wildcard && d == "":
+		return &problem{"wildcard without a domain", "write '" + bang + "*.example.com' with the domain after the dot"}
+	case strings.ContainsAny(d, " \t"):
+		return &problem{"space in rule", "one rule per line, with no comment after it; put the comment on its own line starting with '#'"}
+	case strings.Contains(d, "*"):
+		hint := "a '*' is only valid as the first label, as in '" + bang + "*.example.com'"
+		if !wildcard && strings.HasPrefix(d, "*") && validDomain(strings.TrimLeft(d, "*.")) && strings.TrimLeft(d, "*.") != "" {
+			hint = "write '" + bang + "*." + strings.TrimLeft(d, "*.") + "' for the subdomains of " + strings.TrimLeft(d, "*.")
+		}
+		return &problem{"misplaced wildcard", hint}
+	case strings.HasPrefix(d, "["):
+		return &problem{"bracketed IPv6 address", "write the address without brackets: '" + bang + strings.Trim(d, "[]") + "'"}
+	case strings.Contains(d, ":"):
+		reason := "port in rule"
+		if i := strings.LastIndex(d, ":"); i < 0 || !allDigits(d[i+1:]) || strings.Count(d, ":") > 1 {
+			reason = "':' in rule"
+		}
+		return &problem{reason, "use the host only: " + suggest(bang, body)}
+	case d == "" || strings.HasPrefix(d, ".") || strings.HasSuffix(d, ".") || strings.Contains(d, ".."):
+		fixed := strings.Join(strings.FieldsFunc(d, func(r rune) bool { return r == '.' }), ".")
+		if fixed == "" {
+			return &problem{"empty label (a leading, trailing or doubled dot)", "write a domain such as '" + bang + "example.com'"}
+		}
+		return &problem{"empty label (a leading, trailing or doubled dot)", "remove the extra dot, as in '" + bang + fixed + "'"}
+	case !validLabels(d):
+		return &problem{"invalid character", "use only letters, digits, '-', '_' and '.'; write internationalized names in punycode (xn--...)"}
+	case !validDomain(d):
+		return &problem{"numeric last label (looks like an IPv4 address in a form clients read differently)", "write the full dotted address ('10.0.0.7'), a CIDR ('10.0.0.0/24') or a domain name"}
+	}
+	return nil
+}
+
+func allDigits(s string) bool { return s != "" && strings.Trim(s, "0123456789") == "" }
+
+// suggest cuts a rule down to the host it probably meant: no scheme, userinfo, port, path or query. It keeps
+// a leading "*." and quotes the result for a hint; with no usable host it says what a rule looks like.
+func suggest(bang, body string) string {
+	t := body
+	if i := strings.Index(t, "://"); i >= 0 {
+		t = t[i+3:]
+	}
+	if i := strings.IndexAny(t, "/?#"); i >= 0 {
+		t = t[:i]
+	}
+	if i := strings.LastIndex(t, "@"); i >= 0 {
+		t = t[i+1:]
+	}
+	wild := strings.HasPrefix(t, "*.")
+	t = strings.TrimPrefix(t, "*.")
+	if i := strings.LastIndex(t, ":"); i >= 0 && strings.Count(t, ":") == 1 {
+		t = t[:i]
+	}
+	t = strings.TrimSuffix(t, ".")
+	if !validDomain(t) && net.ParseIP(t) == nil {
+		return "'" + bang + "example.com'"
+	}
+	if wild {
+		t = "*." + t
+	}
+	return "'" + bang + t + "'"
 }
 
 func (s *Scope) includes() []rule {
@@ -291,11 +386,20 @@ func hasScheme(t string) bool {
 // rule), and a last label that is not all digits, which would be an IPv4 address written in a form
 // some clients read differently ("010.0.0.7", "10.1", "0x7f.1").
 func validDomain(d string) bool {
+	if !validLabels(d) {
+		return false
+	}
+	last := d[strings.LastIndex(d, ".")+1:]
+	return strings.Trim(last, "0123456789") != ""
+}
+
+// validLabels reports whether d is a non-empty list of non-empty dot-separated labels made of letters,
+// digits, "-", "_" and bytes >= 0x80.
+func validLabels(d string) bool {
 	if d == "" {
 		return false
 	}
-	labels := strings.Split(d, ".")
-	for _, l := range labels {
+	for _, l := range strings.Split(d, ".") {
 		if l == "" {
 			return false
 		}
@@ -308,6 +412,5 @@ func validDomain(d string) bool {
 			}
 		}
 	}
-	last := labels[len(labels)-1]
-	return strings.Trim(last, "0123456789") != ""
+	return true
 }
