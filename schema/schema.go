@@ -22,6 +22,13 @@ import (
 	"sort"
 )
 
+// Version is the version of the Raijin Schema this package writes and the newest one Parse reads. It is
+// written as the first field of every Result, "schema_version". It changes only when a field the readers
+// depend on changes meaning or goes away; adding an optional field does not change it.
+//
+// Documents written before the field existed have no "schema_version"; Parse reads them as version 0.
+const Version = 1
+
 // Marshal is json.Marshal without HTML escaping: "<", ">" and "&" stay as written instead of becoming
 // "<", which costs tokens and nothing else. The result has no trailing newline.
 func Marshal(v any) ([]byte, error) {
@@ -50,7 +57,9 @@ func Write(w io.Writer, v any, pretty bool) error {
 //
 //	type Result = schema.Result[Finding, Group]
 //
-// The fields are written in the order they are declared here. Origin, URL, Match and Filter sit between
+// The JSON starts with "schema_version" (the constant Version), which a Result does not carry: it is
+// always written, so a tool cannot forget it. The other fields are written in the order they are declared
+// here. Origin, URL, Match and Filter sit between
 // the summary and the findings; a tool sets only the ones it documents and the rest are left out.
 type Result[F, G any] struct {
 	Tool    string `json:"tool"`
@@ -90,9 +99,10 @@ func (r Result[F, G]) MarshalJSON() ([]byte, error) {
 		r.Groups = []G{}
 	}
 	out := struct {
+		SchemaVersion int `json:"schema_version"`
 		plainResult[F, G]
 		Budget *Budget `json:"budget,omitempty"`
-	}{plainResult: plainResult[F, G](r)}
+	}{SchemaVersion: Version, plainResult: plainResult[F, G](r)}
 	if r.Budget.Truncated {
 		out.Budget = &r.Budget
 	}

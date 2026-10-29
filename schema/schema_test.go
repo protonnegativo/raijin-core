@@ -100,16 +100,16 @@ func TestResultJSON(t *testing.T) {
 		want string
 	}{
 		{"every field, in order", full,
-			`{"tool":"raijin-x","version":"1.2.3","target":"example.com","summary":"1 finding",` +
+			`{"schema_version":1,"tool":"raijin-x","version":"1.2.3","target":"example.com","summary":"1 finding",` +
 				`"origin":"https://example.com","url":"https://example.com/FUZZ","match":"status 200","filter":"size 0",` +
 				`"findings":[{"id":"a","title":"A","severity":"high","confidence":"verified","locations":["/x?a=1&b=<2>"],"new":true}],` +
 				`"groups":[{"id":"g","locations":["/y"]}],` +
 				`"omitted":{"duplicates":1,"out_of_scope":2},"errors":[{"kind":"engine","hint":"install it"}],` +
 				`"next":["raijin-y -l raw.txt"],"raw":"/tmp/raw.txt","budget":{"max_items":5,"max_bytes":100,"truncated":true}}`},
 		{"empty", result{Tool: "raijin-x", Budget: Budget{MaxBytes: 100}},
-			`{"tool":"raijin-x","version":"","target":"","summary":"","findings":[],"groups":[]}`},
+			`{"schema_version":1,"tool":"raijin-x","version":"","target":"","summary":"","findings":[],"groups":[]}`},
 		{"nil and empty lists are both []", result{Findings: []finding{}, Groups: []group{}},
-			`{"tool":"","version":"","target":"","summary":"","findings":[],"groups":[]}`},
+			`{"schema_version":1,"tool":"","version":"","target":"","summary":"","findings":[],"groups":[]}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -213,5 +213,25 @@ func TestSortedKeys(t *testing.T) {
 	}
 	if got := SortedKeys(map[string]bool(nil)); len(got) != 0 || got == nil {
 		t.Errorf("a nil map gives an empty, non-nil list: %#v", got)
+	}
+}
+
+func TestSchemaVersionIsTheFirstField(t *testing.T) {
+	if Version != 1 {
+		t.Fatalf("Version = %d; a change here needs a migration note", Version)
+	}
+	for _, res := range []result{{}, {Tool: "t", Budget: Budget{Truncated: true}}, {Tool: "t", Origin: "o", Findings: []finding{{ID: "a"}}}} {
+		for name, enc := range map[string]func(any) ([]byte, error){"Marshal": Marshal, "json.Marshal": func(v any) ([]byte, error) { return json.Marshal(v) }} {
+			b, err := enc(res)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasPrefix(string(b), `{"schema_version":1,"tool":`) {
+				t.Errorf("%s: %s", name, b)
+			}
+			if strings.Count(string(b), `"schema_version"`) != 1 {
+				t.Errorf("%s: schema_version must appear once: %s", name, b)
+			}
+		}
 	}
 }

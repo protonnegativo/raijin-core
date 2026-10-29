@@ -2,6 +2,7 @@ package schema
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -126,6 +127,52 @@ func TestParse(t *testing.T) {
 	r, err = Parse([]byte(`{"tool":"raijin-scan","findings":[],"groups":[]}`))
 	if err != nil || r.Budget != nil {
 		t.Errorf("a missing budget is nil: %v %+v", err, r)
+	}
+}
+
+func TestParseSchemaVersion(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		want    int
+		wantErr string
+	}{
+		{"current", `{"schema_version":1,"tool":"t"}`, 1, ""},
+		{"absent is version 0", `{"tool":"t"}`, 0, ""},
+		{"explicit 0", `{"schema_version":0,"tool":"t"}`, 0, ""},
+		{"newer than known", `{"schema_version":2,"tool":"t"}`, 0, "unsupported schema_version 2"},
+		{"much newer", `{"schema_version":99,"tool":"t","findings":[]}`, 0, "versions 0 to 1"},
+		{"negative", `{"schema_version":-1,"tool":"t"}`, 0, "unsupported schema_version -1"},
+		{"not an integer", `{"schema_version":1.5,"tool":"t"}`, 0, "not a Raijin output"},
+		{"a string", `{"schema_version":"1","tool":"t"}`, 0, "not a Raijin output"},
+		{"no tool wins over the version", `{"schema_version":9}`, 0, "no tool field"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, err := Parse([]byte(tt.in))
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want it to contain %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || r.SchemaVersion != tt.want {
+				t.Errorf("got %+v, %v; want version %d", r, err, tt.want)
+			}
+		})
+	}
+	_, err := Parse([]byte(`{"schema_version":2,"tool":"t"}`))
+	var ve *VersionError
+	if !errors.As(err, &ve) || ve.Got != 2 || ve.Max != Version {
+		t.Errorf("errors.As(*VersionError) = %v %+v", err, ve)
+	}
+}
+
+func TestParseReadsWhatMarshalWrites(t *testing.T) {
+	b, _ := Marshal(Result[Entry, Entry]{Tool: "t"})
+	r, err := Parse(b)
+	if err != nil || r.SchemaVersion != Version {
+		t.Errorf("%+v %v", r, err)
 	}
 }
 

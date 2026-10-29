@@ -10,20 +10,35 @@ import (
 // Run is one Raijin tool output, read back from its JSON. It does not know each tool's finding and group
 // fields, so it keeps every entry as an Entry.
 type Run struct {
-	Tool     string         `json:"tool"`
-	Version  string         `json:"version"`
-	Target   string         `json:"target"`
-	Summary  string         `json:"summary"`
-	Origin   string         `json:"origin"`
-	Findings []Entry        `json:"findings"`
-	Groups   []Entry        `json:"groups"`
-	Omitted  map[string]int `json:"omitted"`
-	Errors   []Error        `json:"errors"`
-	Raw      string         `json:"raw"`
-	Budget   *Budget        `json:"budget"`
+	// SchemaVersion is the document's "schema_version"; 0 when the document has none.
+	SchemaVersion int            `json:"schema_version"`
+	Tool          string         `json:"tool"`
+	Version       string         `json:"version"`
+	Target        string         `json:"target"`
+	Summary       string         `json:"summary"`
+	Origin        string         `json:"origin"`
+	Findings      []Entry        `json:"findings"`
+	Groups        []Entry        `json:"groups"`
+	Omitted       map[string]int `json:"omitted"`
+	Errors        []Error        `json:"errors"`
+	Raw           string         `json:"raw"`
+	Budget        *Budget        `json:"budget"`
 }
 
-// Parse reads one Raijin tool output. It fails when b is not a JSON object with a tool field.
+// VersionError is what Parse returns for a document written with a schema version it does not know.
+type VersionError struct {
+	// Got is the document's schema_version; Max is the newest version this build reads.
+	Got, Max int
+}
+
+// Error implements error.
+func (e *VersionError) Error() string {
+	return fmt.Sprintf("unsupported schema_version %d: this reader understands versions 0 to %d; update raijin-core (or the tool that reads the document)", e.Got, e.Max)
+}
+
+// Parse reads one Raijin tool output. It fails when b is not a JSON object with a tool field, and with a
+// *VersionError when its schema_version is newer than Version. A document with no schema_version, from a
+// tool older than the field, is read as version 0.
 func Parse(b []byte) (*Run, error) {
 	var r Run
 	if err := json.Unmarshal(b, &r); err != nil {
@@ -31,6 +46,9 @@ func Parse(b []byte) (*Run, error) {
 	}
 	if r.Tool == "" {
 		return nil, errors.New("not a Raijin output: no tool field")
+	}
+	if r.SchemaVersion < 0 || r.SchemaVersion > Version {
+		return nil, &VersionError{Got: r.SchemaVersion, Max: Version}
 	}
 	return &r, nil
 }
