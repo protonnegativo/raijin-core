@@ -459,3 +459,28 @@ func TestCoversIsNotAllowed(t *testing.T) {
 		t.Error("*.example.com covers example.com but does not allow it")
 	}
 }
+
+// FuzzAllowed checks, for any input, that Allowed never panics and that the only host a scope of
+// "example.com" lets through is example.com itself, whatever the target looks like. Plain "go test" runs
+// the seeds; "go test -fuzz FuzzAllowed ./scope" explores.
+func FuzzAllowed(f *testing.F) {
+	for _, seed := range []string{
+		"example.com", "https://example.com@evil.com", "example.com.evil.com", "evil.com/example.com",
+		"http://[::1]:80", "example.com:80:80", `http://example.com\@evil.com`, "EXAMPLE.com.", "example.com%00.evil.com",
+		"http://user:pass@example.com:99/x?y=http://evil.com#z", "\x00", "[", "::", "//example.com",
+	} {
+		f.Add(seed)
+	}
+	sc, err := Parse([]string{"example.com", "!blocked.example.com"})
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Fuzz(func(t *testing.T, target string) {
+		if !sc.Allowed(target) {
+			return
+		}
+		if h := Hostname(target); h != "example.com" {
+			t.Errorf("Allowed(%q) is true but the host is %q", target, h)
+		}
+	})
+}
